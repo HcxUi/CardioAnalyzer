@@ -1,0 +1,22 @@
+[build]
+command = "pip install -r requirements.txt && mkdir -p public && cp -r * public/"
+publish = "public"
+
+[build.environment]
+PYTHON_VERSION = "3.9"
+
+[[redirects]]
+from = "/*"
+to = "/index.html"
+status = 200
+
+[functions]
+directory = "netlify/functions"
+node_bundler = "esbuild"
+
+[dev]
+framework = "#custom"
+command = "streamlit run app.py"
+targetsPort = 8501
+port = 8888
+publishPort = 3000
