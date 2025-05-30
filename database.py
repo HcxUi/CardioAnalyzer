@@ -7,19 +7,42 @@ from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 import json
 
-# Initialize SQLAlchemy
+# Get database URL from environment variable
+DATABASE_URL = os.environ.get('DATABASE_URL')
+
+# Check if DATABASE_URL is available
+if not DATABASE_URL:
+    print("WARNING: DATABASE_URL is not set. Database functionality will be disabled.")
+    engine = None
+    Session = None
+else:
+    try:
+        # Create SQLAlchemy engine with SSL settings to handle connection issues
+        connect_args = {"sslmode": "require"}
+        engine = create_engine(DATABASE_URL, connect_args=connect_args)
+        
+        # Create session factory
+        Session = sessionmaker(bind=engine)
+    except Exception as e:
+        print(f"Error connecting to database: {e}")
+        engine = None
+        Session = None
+
+# Create declarative base
 Base = declarative_base()
 
-# Define PredictionResult model
+# Define Prediction table
 class PredictionResult(Base):
     __tablename__ = 'prediction_results'
     
     id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    patient_id = Column(String(50))
+    timestamp = Column(DateTime, default=datetime.now)
     age = Column(Float)
     gender = Column(Integer)
     height = Column(Float)
     weight = Column(Float)
+    bmi = Column(Float)
     ap_hi = Column(Integer)
     ap_lo = Column(Integer)
     cholesterol = Column(Integer)
@@ -27,53 +50,82 @@ class PredictionResult(Base):
     smoke = Column(Boolean)
     alco = Column(Boolean)
     active = Column(Boolean)
-    bmi = Column(Float)
     predicted_cardio = Column(Boolean)
     prediction_probability = Column(Float)
-    model_name = Column(String)
+    model_used = Column(String(100))
+    feature_values = Column(Text)  # JSON string of all features
 
-# Initialize database connection
-try:
-    DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///predictions.db')
-    engine = create_engine(DATABASE_URL)
-    Session = sessionmaker(bind=engine)
+    def __repr__(self):
+        return f"<PredictionResult(id={self.id}, patient_id={self.patient_id}, predicted_cardio={self.predicted_cardio})>"
+
+# Create tables in the database if engine is available
+if engine:
     Base.metadata.create_all(engine)
-except Exception as e:
-    print(f"Database initialization error: {e}")
-    Session = None
 
-def save_prediction(features, prediction, probability, model_name):
-    """Save prediction results to database."""
+def save_prediction(patient_data, prediction, probability, model_name):
+    """
+    Save a prediction result to the database
+    
+    Args:
+        patient_data: Dictionary or DataFrame row with patient information
+        prediction: Predicted value (0 or 1)
+        probability: Prediction probability
+        model_name: Name of the model used
+    
+    Returns:
+        Saved prediction record ID or None if database is not available
+    """
+    # Check if database is configured
     if Session is None:
+        print("Warning: Database not configured. Prediction not saved.")
         return None
     
+    session = Session()
+    
     try:
-        session = Session()
-        result = PredictionResult(
-            age=features['age_years'],
-            gender=features['gender'],
-            height=features['height'],
-            weight=features['weight'],
-            ap_hi=features['ap_hi'],
-            ap_lo=features['ap_lo'],
-            cholesterol=features['cholesterol'],
-            gluc=features['gluc'],
-            smoke=bool(features['smoke']),
-            alco=bool(features['alco']),
-            active=bool(features['active']),
-            bmi=features['bmi'],
+        # Convert to dictionary if it's a DataFrame row
+        if isinstance(patient_data, pd.Series):
+            patient_data = patient_data.to_dict()
+        
+        # Create feature values JSON
+        feature_values = json.dumps(patient_data)
+        
+        # Create prediction result record
+        prediction_result = PredictionResult(
+            patient_id=str(patient_data.get('id', 'unknown')),
+            age=patient_data.get('age_years', patient_data.get('age', 0) / 365.25),
+            gender=patient_data.get('gender', 0),
+            height=patient_data.get('height', 0),
+            weight=patient_data.get('weight', 0),
+            bmi=patient_data.get('bmi', 0),
+            ap_hi=patient_data.get('ap_hi', 0),
+            ap_lo=patient_data.get('ap_lo', 0),
+            cholesterol=patient_data.get('cholesterol', 0),
+            gluc=patient_data.get('gluc', 0),
+            smoke=bool(patient_data.get('smoke', 0)),
+            alco=bool(patient_data.get('alco', 0)),
+            active=bool(patient_data.get('active', 0)),
             predicted_cardio=bool(prediction),
             prediction_probability=float(probability),
-            model_name=model_name
+            model_used=model_name,
+            feature_values=feature_values
         )
-        session.add(result)
+        
+        # Add and commit
+        session.add(prediction_result)
         session.commit()
-        db_id = result.id
-        session.close()
-        return db_id
+        
+        return prediction_result.id
+    
     except Exception as e:
-        print(f"Error saving prediction: {e}")
+        if session:
+            session.rollback()
+        print(f"Database error: {e}")
         return None
+    
+    finally:
+        if session:
+            session.close()
 
 @pd.api.extensions.register_dataframe_accessor("cache_key")
 class CacheKeyAccessor:
@@ -119,7 +171,7 @@ def get_prediction_history(limit=100):
             PredictionResult.bmi,
             PredictionResult.predicted_cardio,
             PredictionResult.prediction_probability,
-            PredictionResult.model_name
+            PredictionResult.model_used
         ).order_by(PredictionResult.timestamp.desc()).limit(limit).all()
         
         # Convert to DataFrame
@@ -129,7 +181,7 @@ def get_prediction_history(limit=100):
             # Use a more efficient method to create DataFrame
             df = pd.DataFrame(results, columns=[
                 'id', 'patient_id', 'timestamp', 'age', 'gender', 'bmi',
-                'predicted_cardio', 'prediction_probability', 'model_name'
+                'predicted_cardio', 'prediction_probability', 'model_used'
             ])
         
         # Cache the result
@@ -197,9 +249,9 @@ def get_prediction_stats():
         # Get counts by model in a single query
         model_counts = {}
         model_stats = session.query(
-            PredictionResult.model_name,
+            PredictionResult.model_used,
             func.count(PredictionResult.id)
-        ).group_by(PredictionResult.model_name).all()
+        ).group_by(PredictionResult.model_used).all()
         
         for model_name, count in model_stats:
             model_counts[model_name] = count
