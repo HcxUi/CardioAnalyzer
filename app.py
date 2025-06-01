@@ -62,7 +62,7 @@ def main():
     # For Netlify function handler
     return {
         'statusCode': 200,
-        'body': st.get_component_value(),
+        #'body': st.get_component_value(),
         'headers': {
             'Content-Type': 'text/html'
         }
